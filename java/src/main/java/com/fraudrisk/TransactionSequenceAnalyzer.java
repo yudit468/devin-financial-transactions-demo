@@ -8,8 +8,10 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Analyzes transaction sequences per customer to detect anomalous patterns.
@@ -35,6 +37,9 @@ public class TransactionSequenceAnalyzer {
 
     /** Minimum number of high-value transactions in a short window to flag as rapid sequence */
     private static final int RAPID_HIGH_VALUE_MIN_COUNT = 2;
+
+    /** Maximum number of anomaly rows in the report (below 50) */
+    private static final int MAX_REPORT_ROWS = 49;
 
     /**
      * Group transactions by originating customer (nameOrig) and sort each
@@ -273,7 +278,147 @@ public class TransactionSequenceAnalyzer {
     }
 
     /**
-     * Run all anomaly detection rules across all customers in the dataset.
+     * Detect individual high-value TRANSFER or CASH_OUT transactions.
+     * These are suspicious on their own regardless of sequence context.
+     */
+    public List<AnomalyResult> detectHighValueTransferOrCashout(List<Transaction> transactions) {
+        List<AnomalyResult> anomalies = new ArrayList<AnomalyResult>();
+        for (Transaction txn : transactions) {
+            String type = txn.getType();
+            if (("TRANSFER".equals(type) || "CASH_OUT".equals(type)) && txn.getAmount() > HIGH_VALUE_THRESHOLD) {
+                AnomalyResult.Severity severity = txn.getAmount() > 200000
+                        ? AnomalyResult.Severity.HIGH : AnomalyResult.Severity.MEDIUM;
+                List<Integer> ids = new ArrayList<Integer>();
+                ids.add(txn.getTransactionId());
+                anomalies.add(new AnomalyResult(
+                        txn.getNameOrig(),
+                        AnomalyResult.AnomalyType.HIGH_VALUE_TRANSFER_OR_CASHOUT,
+                        severity,
+                        ids,
+                        String.format("High-value %s of %.2f by %s (txn %d)",
+                                type, txn.getAmount(), txn.getNameOrig(), txn.getTransactionId())
+                ));
+            }
+        }
+        return anomalies;
+    }
+
+    /**
+     * Detect transactions where the origin account is fully drained to zero.
+     * This is a common fraud indicator, especially for TRANSFER and CASH_OUT types.
+     */
+    public List<AnomalyResult> detectAccountDrain(List<Transaction> transactions) {
+        List<AnomalyResult> anomalies = new ArrayList<AnomalyResult>();
+        for (Transaction txn : transactions) {
+            if (txn.getOldbalanceOrg() > 0 && txn.getNewbalanceOrig() == 0) {
+                AnomalyResult.Severity severity;
+                if ("TRANSFER".equals(txn.getType()) || "CASH_OUT".equals(txn.getType())) {
+                    severity = AnomalyResult.Severity.HIGH;
+                } else {
+                    severity = AnomalyResult.Severity.MEDIUM;
+                }
+                List<Integer> ids = new ArrayList<Integer>();
+                ids.add(txn.getTransactionId());
+                anomalies.add(new AnomalyResult(
+                        txn.getNameOrig(),
+                        AnomalyResult.AnomalyType.ACCOUNT_DRAIN,
+                        severity,
+                        ids,
+                        String.format("Account %s fully drained: %.2f -> 0 via %s (txn %d, amount=%.2f)",
+                                txn.getNameOrig(), txn.getOldbalanceOrg(), txn.getType(),
+                                txn.getTransactionId(), txn.getAmount())
+                ));
+            }
+        }
+        return anomalies;
+    }
+
+    /**
+     * Detect cross-account TRANSFER to CASH_OUT patterns.
+     * Flags when a TRANSFER sends money to an account that also originates a CASH_OUT
+     * in the same time step, indicating potential layering across accounts.
+     */
+    public List<AnomalyResult> detectCrossAccountTransferCashout(List<Transaction> transactions) {
+        List<AnomalyResult> anomalies = new ArrayList<AnomalyResult>();
+
+        // Build a set of accounts that originate CASH_OUT transactions, keyed by step
+        Map<Integer, Set<String>> cashoutOriginsByStep = new HashMap<Integer, Set<String>>();
+        Map<String, List<Transaction>> cashoutTxnsByOrig = new HashMap<String, List<Transaction>>();
+        for (Transaction txn : transactions) {
+            if ("CASH_OUT".equals(txn.getType())) {
+                int step = txn.getStep();
+                if (!cashoutOriginsByStep.containsKey(step)) {
+                    cashoutOriginsByStep.put(step, new HashSet<String>());
+                }
+                cashoutOriginsByStep.get(step).add(txn.getNameOrig());
+
+                if (!cashoutTxnsByOrig.containsKey(txn.getNameOrig())) {
+                    cashoutTxnsByOrig.put(txn.getNameOrig(), new ArrayList<Transaction>());
+                }
+                cashoutTxnsByOrig.get(txn.getNameOrig()).add(txn);
+            }
+        }
+
+        // Check TRANSFERs whose destination matches a CASH_OUT origin in the same step
+        for (Transaction txn : transactions) {
+            if ("TRANSFER".equals(txn.getType())) {
+                int step = txn.getStep();
+                Set<String> cashoutOriginsInStep = cashoutOriginsByStep.get(step);
+                if (cashoutOriginsInStep != null && cashoutOriginsInStep.contains(txn.getNameDest())) {
+                    List<Transaction> matchingCashouts = cashoutTxnsByOrig.get(txn.getNameDest());
+                    if (matchingCashouts != null) {
+                        for (Transaction co : matchingCashouts) {
+                            if (co.getStep() == step) {
+                                List<Integer> ids = new ArrayList<Integer>();
+                                ids.add(txn.getTransactionId());
+                                ids.add(co.getTransactionId());
+                                anomalies.add(new AnomalyResult(
+                                        txn.getNameOrig(),
+                                        AnomalyResult.AnomalyType.CROSS_ACCOUNT_TRANSFER_CASHOUT,
+                                        AnomalyResult.Severity.HIGH,
+                                        ids,
+                                        String.format("Cross-account pattern: %s TRANSFER (%.2f) to %s, who CASH_OUT (%.2f) in same step %d",
+                                                txn.getNameOrig(), txn.getAmount(), txn.getNameDest(),
+                                                co.getAmount(), step)
+                                ));
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return anomalies;
+    }
+
+    /**
+     * Detect transactions originating from accounts with zero balance.
+     * Transacting from a zero-balance account is inherently suspicious.
+     */
+    public List<AnomalyResult> detectZeroBalanceOrigin(List<Transaction> transactions) {
+        List<AnomalyResult> anomalies = new ArrayList<AnomalyResult>();
+        for (Transaction txn : transactions) {
+            if (txn.getOldbalanceOrg() == 0 && txn.getAmount() > 0
+                    && ("TRANSFER".equals(txn.getType()) || "CASH_OUT".equals(txn.getType()))) {
+                List<Integer> ids = new ArrayList<Integer>();
+                ids.add(txn.getTransactionId());
+                anomalies.add(new AnomalyResult(
+                        txn.getNameOrig(),
+                        AnomalyResult.AnomalyType.ZERO_BALANCE_ORIGIN,
+                        AnomalyResult.Severity.HIGH,
+                        ids,
+                        String.format("%s of %.2f from zero-balance account %s (txn %d)",
+                                txn.getType(), txn.getAmount(), txn.getNameOrig(), txn.getTransactionId())
+                ));
+            }
+        }
+        return anomalies;
+    }
+
+    /**
+     * Run all anomaly detection rules across the dataset.
+     * Includes both per-customer sequence analysis and cross-account/individual
+     * transaction anomaly detection.
      *
      * @param transactions the full list of transactions loaded from CSV
      * @return list of all detected anomalies
@@ -282,6 +427,7 @@ public class TransactionSequenceAnalyzer {
         Map<String, List<Transaction>> grouped = groupByCustomer(transactions);
         List<AnomalyResult> allAnomalies = new ArrayList<AnomalyResult>();
 
+        // Per-customer sequence-based detection
         for (Map.Entry<String, List<Transaction>> entry : grouped.entrySet()) {
             String customerId = entry.getKey();
             List<Transaction> customerTxns = entry.getValue();
@@ -293,7 +439,40 @@ public class TransactionSequenceAnalyzer {
             allAnomalies.addAll(detectRapidHighValueSequence(customerId, customerTxns));
             allAnomalies.addAll(detectSuddenTypeChange(customerId, customerTxns));
         }
+
+        // Individual transaction anomaly detection
+        allAnomalies.addAll(detectHighValueTransferOrCashout(transactions));
+        allAnomalies.addAll(detectAccountDrain(transactions));
+        allAnomalies.addAll(detectZeroBalanceOrigin(transactions));
+
+        // Cross-account pattern detection
+        allAnomalies.addAll(detectCrossAccountTransferCashout(transactions));
+
+        // Sort by severity (HIGH first) then by anomaly type for consistent ordering
+        Collections.sort(allAnomalies, new Comparator<AnomalyResult>() {
+            @Override
+            public int compare(AnomalyResult a, AnomalyResult b) {
+                int sevCmp = Integer.compare(severityOrder(b.getSeverity()), severityOrder(a.getSeverity()));
+                if (sevCmp != 0) return sevCmp;
+                return a.getAnomalyType().compareTo(b.getAnomalyType());
+            }
+        });
+
+        // Limit to MAX_REPORT_ROWS to keep the report concise
+        if (allAnomalies.size() > MAX_REPORT_ROWS) {
+            allAnomalies = new ArrayList<AnomalyResult>(allAnomalies.subList(0, MAX_REPORT_ROWS));
+        }
+
         return allAnomalies;
+    }
+
+    private int severityOrder(AnomalyResult.Severity severity) {
+        switch (severity) {
+            case HIGH: return 3;
+            case MEDIUM: return 2;
+            case LOW: return 1;
+            default: return 0;
+        }
     }
 
     /**

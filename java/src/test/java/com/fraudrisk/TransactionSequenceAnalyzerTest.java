@@ -348,6 +348,145 @@ class TransactionSequenceAnalyzerTest {
         assertEquals(1, anomalies.size());
     }
 
+    // --- detectHighValueTransferOrCashout tests ---
+
+    @Test
+    void testDetectHighValueTransferOrCashoutLargeTransfer() {
+        List<Transaction> txns = new ArrayList<Transaction>();
+        txns.add(createTransaction(0, 1, "TRANSFER", 50000, "C1", 100000, 50000, "C2", 0, 50000, 0, 0));
+
+        List<AnomalyResult> anomalies = analyzer.detectHighValueTransferOrCashout(txns);
+        assertEquals(1, anomalies.size());
+        assertEquals(AnomalyResult.AnomalyType.HIGH_VALUE_TRANSFER_OR_CASHOUT, anomalies.get(0).getAnomalyType());
+        assertEquals(AnomalyResult.Severity.MEDIUM, anomalies.get(0).getSeverity());
+    }
+
+    @Test
+    void testDetectHighValueTransferOrCashoutVeryLarge() {
+        List<Transaction> txns = new ArrayList<Transaction>();
+        txns.add(createTransaction(0, 1, "CASH_OUT", 300000, "C1", 300000, 0, "C2", 0, 300000, 0, 0));
+
+        List<AnomalyResult> anomalies = analyzer.detectHighValueTransferOrCashout(txns);
+        assertEquals(1, anomalies.size());
+        assertEquals(AnomalyResult.Severity.HIGH, anomalies.get(0).getSeverity());
+    }
+
+    @Test
+    void testDetectHighValueTransferOrCashoutPaymentIgnored() {
+        List<Transaction> txns = new ArrayList<Transaction>();
+        txns.add(createTransaction(0, 1, "PAYMENT", 50000, "C1", 100000, 50000, "M1", 0, 0, 0, 0));
+
+        List<AnomalyResult> anomalies = analyzer.detectHighValueTransferOrCashout(txns);
+        assertEquals(0, anomalies.size());
+    }
+
+    @Test
+    void testDetectHighValueTransferOrCashoutBelowThreshold() {
+        List<Transaction> txns = new ArrayList<Transaction>();
+        txns.add(createTransaction(0, 1, "TRANSFER", 5000, "C1", 10000, 5000, "C2", 0, 5000, 0, 0));
+
+        List<AnomalyResult> anomalies = analyzer.detectHighValueTransferOrCashout(txns);
+        assertEquals(0, anomalies.size());
+    }
+
+    // --- detectAccountDrain tests ---
+
+    @Test
+    void testDetectAccountDrainTransfer() {
+        List<Transaction> txns = new ArrayList<Transaction>();
+        txns.add(createTransaction(0, 1, "TRANSFER", 5000, "C1", 5000, 0, "C2", 0, 5000, 0, 0));
+
+        List<AnomalyResult> anomalies = analyzer.detectAccountDrain(txns);
+        assertEquals(1, anomalies.size());
+        assertEquals(AnomalyResult.AnomalyType.ACCOUNT_DRAIN, anomalies.get(0).getAnomalyType());
+        assertEquals(AnomalyResult.Severity.HIGH, anomalies.get(0).getSeverity());
+    }
+
+    @Test
+    void testDetectAccountDrainPayment() {
+        List<Transaction> txns = new ArrayList<Transaction>();
+        txns.add(createTransaction(0, 1, "PAYMENT", 5000, "C1", 5000, 0, "M1", 0, 0, 0, 0));
+
+        List<AnomalyResult> anomalies = analyzer.detectAccountDrain(txns);
+        assertEquals(1, anomalies.size());
+        assertEquals(AnomalyResult.Severity.MEDIUM, anomalies.get(0).getSeverity());
+    }
+
+    @Test
+    void testDetectAccountDrainNoZero() {
+        List<Transaction> txns = new ArrayList<Transaction>();
+        txns.add(createTransaction(0, 1, "TRANSFER", 5000, "C1", 10000, 5000, "C2", 0, 5000, 0, 0));
+
+        List<AnomalyResult> anomalies = analyzer.detectAccountDrain(txns);
+        assertEquals(0, anomalies.size());
+    }
+
+    // --- detectCrossAccountTransferCashout tests ---
+
+    @Test
+    void testDetectCrossAccountTransferCashout() {
+        List<Transaction> txns = new ArrayList<Transaction>();
+        // C1 transfers to C2, C2 does CASH_OUT in same step
+        txns.add(createTransaction(0, 1, "TRANSFER", 50000, "C1", 100000, 50000, "C2", 0, 50000, 0, 0));
+        txns.add(createTransaction(1, 1, "CASH_OUT", 30000, "C2", 50000, 20000, "C3", 0, 30000, 0, 0));
+
+        List<AnomalyResult> anomalies = analyzer.detectCrossAccountTransferCashout(txns);
+        assertEquals(1, anomalies.size());
+        assertEquals(AnomalyResult.AnomalyType.CROSS_ACCOUNT_TRANSFER_CASHOUT, anomalies.get(0).getAnomalyType());
+        assertEquals(AnomalyResult.Severity.HIGH, anomalies.get(0).getSeverity());
+    }
+
+    @Test
+    void testDetectCrossAccountTransferCashoutDifferentStep() {
+        List<Transaction> txns = new ArrayList<Transaction>();
+        txns.add(createTransaction(0, 1, "TRANSFER", 50000, "C1", 100000, 50000, "C2", 0, 50000, 0, 0));
+        txns.add(createTransaction(1, 5, "CASH_OUT", 30000, "C2", 50000, 20000, "C3", 0, 30000, 0, 0));
+
+        List<AnomalyResult> anomalies = analyzer.detectCrossAccountTransferCashout(txns);
+        assertEquals(0, anomalies.size());
+    }
+
+    @Test
+    void testDetectCrossAccountTransferCashoutNoMatch() {
+        List<Transaction> txns = new ArrayList<Transaction>();
+        txns.add(createTransaction(0, 1, "TRANSFER", 50000, "C1", 100000, 50000, "C2", 0, 50000, 0, 0));
+        txns.add(createTransaction(1, 1, "CASH_OUT", 30000, "C5", 50000, 20000, "C3", 0, 30000, 0, 0));
+
+        List<AnomalyResult> anomalies = analyzer.detectCrossAccountTransferCashout(txns);
+        assertEquals(0, anomalies.size());
+    }
+
+    // --- detectZeroBalanceOrigin tests ---
+
+    @Test
+    void testDetectZeroBalanceOriginTransfer() {
+        List<Transaction> txns = new ArrayList<Transaction>();
+        txns.add(createTransaction(0, 1, "TRANSFER", 50000, "C1", 0, 0, "C2", 0, 50000, 0, 0));
+
+        List<AnomalyResult> anomalies = analyzer.detectZeroBalanceOrigin(txns);
+        assertEquals(1, anomalies.size());
+        assertEquals(AnomalyResult.AnomalyType.ZERO_BALANCE_ORIGIN, anomalies.get(0).getAnomalyType());
+        assertEquals(AnomalyResult.Severity.HIGH, anomalies.get(0).getSeverity());
+    }
+
+    @Test
+    void testDetectZeroBalanceOriginPaymentIgnored() {
+        List<Transaction> txns = new ArrayList<Transaction>();
+        txns.add(createTransaction(0, 1, "PAYMENT", 5000, "C1", 0, 0, "M1", 0, 0, 0, 0));
+
+        List<AnomalyResult> anomalies = analyzer.detectZeroBalanceOrigin(txns);
+        assertEquals(0, anomalies.size());
+    }
+
+    @Test
+    void testDetectZeroBalanceOriginNonZeroBalance() {
+        List<Transaction> txns = new ArrayList<Transaction>();
+        txns.add(createTransaction(0, 1, "TRANSFER", 50000, "C1", 100000, 50000, "C2", 0, 50000, 0, 0));
+
+        List<AnomalyResult> anomalies = analyzer.detectZeroBalanceOrigin(txns);
+        assertEquals(0, anomalies.size());
+    }
+
     // --- analyzeAll tests ---
 
     @Test

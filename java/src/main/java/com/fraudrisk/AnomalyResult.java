@@ -26,7 +26,11 @@ public class AnomalyResult {
         SUDDEN_AMOUNT_INCREASE,
         TRANSFER_TRANSFER_CASHOUT,
         RAPID_HIGH_VALUE_SEQUENCE,
-        SUDDEN_TYPE_CHANGE
+        SUDDEN_TYPE_CHANGE,
+        HIGH_VALUE_TRANSFER_OR_CASHOUT,
+        ACCOUNT_DRAIN,
+        CROSS_ACCOUNT_TRANSFER_CASHOUT,
+        ZERO_BALANCE_ORIGIN
     }
 
     private final String customerId;
